@@ -20,6 +20,89 @@
 # Can be sourced from a shell, and each function used independently
 # Requires GOPATH to be set to the working root istio directory.
 
+# Environment variables used by functions:
+# - VMNAME - name of the VM
+# - K8SCLUSTER - name of the K8S cluster
+# - PROJECT - project
+
+
+# Get an istio service account secret, extract it to files to be provisioned on a raw VM
+function istio_provision_certs() {
+  local SA=${1:-istio.default}
+
+  kubectl get secret $SA -o jsonpath='{.data.cert-chain\.pem}' |base64 -d  > cert-chain.pem
+  kubectl get secret $SA -o jsonpath='{.data.root-cert\.pem}' |base64 -d  > root-cert.pem
+  kubectl get secret $SA -o jsonpath='{.data.key\.pem}' |base64 -d  > key.pem
+
+}
+
+# Install required files on a VM and run the setup script.
+function istioProvisionVM() {
+ local NAME=${1:-$VMNAME}
+
+ local SA=${2:-istio.default}
+ local ISTIO_IO=${ISTIO_BASE:-${GOPATH:-$HOME/go}}/src/istio.io
+ pushd $ISTIO_IO/proxy
+ istio_provision_certs $SA
+
+ # Remove any old files
+ istioRun $NAME "sudo rm -f istio-*.deb machine_setup.sh"
+
+ # Copy deb, helper and config files
+ # Reviews not copied - VMs don't support labels yet.
+ istioCopy $NAME \
+   kubedns \
+   *.pem \
+   cluster.env \
+   tools/deb/test/machine_setup.sh \
+   $ISTIO_IO/proxy/bazel-bin/tools/deb/istio-proxy-envoy.deb \
+   $ISTIO_IO/pilot/bazel-bin/tools/deb/istio-agent.deb \
+   $ISTIO_IO/auth/bazel-bin/tools/deb/istio-auth-node-agent.deb \
+   $ISTIO_IO/istio/samples/apps/bookinfo/src/details \
+   $ISTIO_IO/istio/samples/apps/bookinfo/src/mysql \
+   $ISTIO_IO/istio/samples/apps/bookinfo/src/productpage \
+   $ISTIO_IO/istio/samples/apps/bookinfo/src/ratings
+
+
+ istioRun $NAME "sudo bash -c -x ./machine_setup.sh $NAME"
+ popd
+}
+
+
+# Configure a service running on the VM.
+# Params:
+# - port of the service
+# - service name (default to raw vm name)
+# - IP of the rawvm (will get it from gcloud if not set)
+# - type - defaults to http
+#
+function istioConfigService() {
+  local NAME=${1:-}
+  local PORT=${2:-}
+  local IP=${3:-}
+  local TYPE=${4:-http}
+
+  # The 'name: http' is critical - without it the service is exposed as TCP
+  local ISTIOCTL=$GOPATH/src/istio.io/pilot/bazel-bin/cmd/istioctl/istioctl
+
+  $ISTIOCTL register $NAME $IP $PORT:$TYPE
+}
+
+
+# Helper to get the external IP of a raw VM
+function istioVMExternalIP() {
+  local NAME=${1:-$VMNAME}
+  gcloud compute instances describe $NAME  $(_istioGcloudOpt) --format='value(networkInterfaces[0].accessConfigs[0].natIP)'
+}
+
+function istioVMInternalIP() {
+  local NAME=${1:-$VMNAME}
+  gcloud compute instances describe $NAME  $(_istioGcloudOpt) --format='value(networkInterfaces[0].networkIP)'
+}
+
+
+
+# Helpers for build / install
 
 # Build debian and binaries for all components we'll test on the VM
 # Will checkout or update from master, in the typical layout.
@@ -56,6 +139,16 @@ function istio_sync() {
 
 }
 
+# Show the branch and status of each istio repo
+function istio_status() {
+  cd $GOPATH/src/istio.io
+
+  for sub in pilot istio mixer auth proxy; do
+     echo -e "\n\n$sub\n"
+     (cd $GOPATH/src/istio.io/$sub; git branch; git status)
+  done
+}
+
 # Build docker images for istio. Intended to test backward compat.
 function istio_build_docker() {
   local TAG=${1:-$(whoami)}
@@ -81,37 +174,6 @@ function istio_k8s_update() {
   done
 }
 
-# Helper to get the external IP of a raw VM
-function istioVMExternalIP() {
-  local NAME=${1:-$TESTVM}
-  gcloud compute --project $PROJECT instances describe $NAME --zone $ISTIO_ZONE --format='value(networkInterfaces[0].accessConfigs[0].natIP)'
-}
-
-function istioVMInternalIP() {
-  local NAME=${1:-$TESTVM}
-  gcloud compute --project $PROJECT instances describe $NAME  --zone $ISTIO_ZONE --format='value(networkInterfaces[0].networkIP)'
-}
-
-
-# Show the branch and status of each istio repo
-function istio_status() {
-  cd $GOPATH/src/istio.io
-
-  for sub in pilot istio mixer auth proxy; do
-     echo -e "\n\n$sub\n"
-     (cd $GOPATH/src/istio.io/$sub; git branch; git status)
-  done
-}
-
-# Get an istio service account secret, extract it to files to be provisioned on a raw VM
-function istio_provision_certs() {
-  local SA=${1:-istio.default}
-
-  kubectl get secret $SA -o jsonpath='{.data.cert-chain\.pem}' |base64 -d  > cert-chain.pem
-  kubectl get secret $SA -o jsonpath='{.data.root-cert\.pem}' |base64 -d  > root-cert.pem
-  kubectl get secret $SA -o jsonpath='{.data.key\.pem}' |base64 -d  > key.pem
-
-}
 
 # Copy files to the VM
 function istioVMCopy() {
@@ -122,13 +184,100 @@ function istioVMCopy() {
   local FILES=$*
   local ISTIO_ZONE=${ISTIO_ZONE:-us-west1-c}
 
-
-  gcloud compute scp  --zone $ISTIO_ZONE --recurse $FILES ${NAME}:
+  local OPTS=""
+  if [[ ${ISTIO_ZONE:-} != "" ]]; then
+     OPTS="$OPTS --zone $ISTIO_ZONE"
+  fi
+  gcloud compute scp  $OPTS --recurse $FILES ${NAME}:
 }
+
+
+
+function ingressIP() {
+  kubectl get service istio-ingress -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
+}
+
+# Copy files to the VM
+function istioCopy() {
+  # TODO: based on some env variable, use different commands for other clusters or for testing with
+  # bare-metal machines.
+  local NAME=$1
+  shift
+  local FILES=$*
+
+  gcloud compute scp --recurse $(_istioGcloudOpt) $FILES ${NAME}:
+}
+
+
+# Create the raw VM.
+function istioVMInit() {
+  # TODO: check if it exists and do "reset", to speed up the script.
+  local NAME=$1
+  local IMAGE=${2:-debian-9-stretch-v20170816}
+  local IMAGE_PROJECT=${3:-debian-cloud}
+
+  gcloud compute instances  describe $NAME  $(_istioGcloudOpt) >/dev/null 2>/dev/null
+  if [[ $? == 0 ]] ; then
+    gcloud compute instances delete $NAME $(_istioGcloudOpt)
+  fi
+
+  gcloud compute \
+     instances create $NAME \
+     $(_istioGcloudOpt) \
+     --machine-type "n1-standard-1" \
+     --subnet default \
+     --can-ip-forward \
+     --scopes "https://www.googleapis.com/auth/cloud-platform" \
+     --tags "http-server","https-server" \
+     --image $IMAGE \
+     --image-project $IMAGE_PROJECT \
+     --boot-disk-size "10" \
+     --boot-disk-type "pd-standard" \
+     --boot-disk-device-name "debtest"
+
+  # Allow access to the VM on port 80 and 9411 (where we run services)
+  local OPTS=""
+  if [[ ${PROJECT:-} != "" ]]; then
+       OPTS="--project $PROJECT"
+  fi
+
+  gcloud compute $OPTS firewall-rules create allow-external  --allow tcp:22,tcp:80,tcp:443,tcp:9411,udp:5228,icmp  --source-ranges 0.0.0.0/0
+
+  # Wait for machine to start up ssh
+  for i in {1..10}
+  do
+    istioRun $NAME 'echo hi' >/dev/null 2>/dev/null
+    if [[ $? -ne 0 ]] ; then
+        echo Waiting for startup $?
+        sleep 5
+    else
+        break
+    fi
+  done
+
+}
+
+function istioVMDelete() {
+  local NAME=${1:-$VMNAME}
+  gcloud compute -q  instances delete $NAME $(_istioGcloudOpt)
+}
+
+
+
+# Run a command in a VM.
+function istioRun() {
+  local NAME=$1
+  local CMD=$2
+
+  gcloud compute ssh $(_istioGcloudOpt) $NAME --command "$CMD"
+}
+
 
 # Helper to use the raw istio config templates directly.
 function istioTmpl() {
   local FILE=$1
+  local TAG=${TAG:-$(whoami)}
+  local HUB=${HUB:-gcr.io/istio-testing}
 
   local SED="s,{PROXY_HUB},$HUB,; s,{PROXY_TAG},$TAG,; "
   SED="$SED s,{MIXER_HUB},$HUB,; s,{MIXER_TAG},$TAG,; "
@@ -151,6 +300,10 @@ function istioInstallCluster() {
     cd ../../addons
     kubectl apply -f grafana.yaml
     kubectl apply -f prometheus.yaml
+    local OPTS=""
+    if [[ ${PROJECT:-} != "" ]]; then
+       OPTS="--project $PROJECT"
+    fi
     kubectl apply -f zipkin.yaml
 
     ISTIOCTL=$GOPATH/src/istio.io/pilot/bazel-bin/cmd/istioctl/istioctl
@@ -263,13 +416,166 @@ EOF
   echo "address=/istio-pilot/$PILOT_IP" >> kubedns
   echo "address=/istio-ca/$CA_IP" >> kubedns
 
-  CIDR=$(gcloud container clusters describe ${K8SCLUSTER} --project ${PROJECT} --zone=${ISTIO_ZONE} --format "value(servicesIpv4Cidr)")
+  CIDR=$(gcloud container clusters describe ${K8SCLUSTER} $(_istioGcloudOpt) --format "value(servicesIpv4Cidr)")
   echo "ISTIO_SERVICE_CIDR=$CIDR" > cluster.env
 
 }
 
-function istioSSHVM() {
-  local NAME=${1:-testvm}
-
-  gcloud compute ssh --project $PROJECT --zone $ISTIO_ZONE $NAME
+# PROJECT and ISTIO_ZONE are optional. If not set, the defaults will be used.
+# Example default setting:
+# gcloud config set compute/zone us-central1-a
+# gcloud config set core/project costin-raw
+function _istioGcloudOpt() {
+    local OPTS=""
+    if [[ ${PROJECT:-} != "" ]]; then
+       OPTS="--project $PROJECT"
+    fi
+    if [[ ${ISTIO_ZONE:-} != "" ]]; then
+       OPTS="$OPTS --zone $ISTIO_ZONE"
+    fi
+    echo $OPTS
 }
+
+function istioSSHVM() {
+  local NAME=${1:-${VMNAME}}
+
+  gcloud compute ssh $(_istioGcloudOpt) $NAME
+}
+
+# Configure a service running on the VM.
+# Params:
+# - port of the service
+# - service name (default to raw vm name)
+# - IP of the rawvm (will get it from gcloud if not set)
+# - type - defaults to http
+#
+function istioConfigServiceKubeCtl() {
+  local NAME=${1:-}
+  local PORT=${2:-}
+  local IP=${3:-}
+  local TYPE=${4:-http}
+
+  # The 'name: http' is critical - without it the service is exposed as TCP
+
+  cat << EOF | kubectl apply -f -
+kind: Service
+apiVersion: v1
+metadata:
+  name: $NAME
+spec:
+  ports:
+    - protocol: TCP
+      port: $PORT
+      name: $TYPE
+
+---
+
+kind: Endpoints
+apiVersion: v1
+metadata:
+  name: $NAME
+subsets:
+  - addresses:
+      - ip: $IP
+    ports:
+      - port: $PORT
+        name: $TYPE
+EOF
+}
+
+
+function istioIngressRoutes() {
+
+cat <<EOF | kubectl apply -f -
+apiVersion: extensions/v1beta1
+kind: Ingress
+metadata:
+  name: zipkin-ingress
+  annotations:
+    kubernetes.io/ingress.class: istio
+spec:
+  rules:
+  - http:
+      paths:
+      - path: /zipkin/.*
+        backend:
+          serviceName: zipkin
+          servicePort: 9411
+EOF
+
+cat <<EOF | kubectl apply -f -
+apiVersion: extensions/v1beta1
+kind: Ingress
+metadata:
+  name: prom-ingress
+  annotations:
+    kubernetes.io/ingress.class: istio
+spec:
+  rules:
+  - http:
+      paths:
+      - path: /zipkin/.*
+        backend:
+          serviceName: zipkin
+          servicePort: 9411
+EOF
+
+
+    cat <<EOF | kubectl apply -f -
+apiVersion: extensions/v1beta1
+kind: Ingress
+metadata:
+  name: grafana-ingress
+  annotations:
+    kubernetes.io/ingress.class: istio
+spec:
+  rules:
+  - http:
+      paths:
+      - path: /grafana/.*
+        backend:
+          serviceName: grafana
+          servicePort: 3000
+      - path: /public/.*
+        backend:
+          serviceName: grafana
+          servicePort: 3000
+      - path: /dashboard/.*
+        backend:
+          serviceName: grafana
+          servicePort: 3000
+      - path: /api/.*
+        backend:
+          serviceName: grafana
+          servicePort: 3000
+EOF
+
+}
+
+# Add a URL route to a raw VM service
+function istioRoute() {
+  local ROUTE=${1:-}
+  local SERVICE=${2:-}
+  local PORT=${3:-}
+
+cat <<EOF | kubectl apply -f -
+apiVersion: extensions/v1beta1
+kind: Ingress
+metadata:
+  name: rawvm-ingress
+  annotations:
+    kubernetes.io/ingress.class: istio
+spec:
+  rules:
+  - http:
+      paths:
+      - path: ${ROUTE}
+        backend:
+          serviceName: ${SERVICE}
+          servicePort: ${PORT}
+EOF
+
+}
+
+
+
