@@ -29,6 +29,7 @@ load(
 )
 
 googleapis_repositories()
+
 mixerapi_repositories()
 
 bind(
@@ -36,10 +37,12 @@ bind(
     actual = "//external:ssl",
 )
 
-git_repository(
+ENVOY_SHA = "b02d8a9b5033a61a7b13d98999f5f00c4b85b6a4"  # Sep 26, 2017 (use github to download tclap instead of sourceforge)
+
+http_archive(
     name = "envoy",
-    remote = "https://github.com/lyft/envoy.git",
-    commit = "419b26e942d606178321af6870fa70a294a7525c",
+    strip_prefix = "envoy-" + ENVOY_SHA,
+    url = "https://github.com/envoyproxy/envoy/archive/" + ENVOY_SHA + ".zip",
 )
 
 load("@envoy//bazel:repositories.bzl", "envoy_dependencies")
@@ -67,11 +70,14 @@ git_repository(
     remote = "https://github.com/pubref/rules_protobuf",
 )
 
+MIXER = "535eb564667cef6aed334cb4f5e967a104768387"
+
 git_repository(
     name = "com_github_istio_mixer",
-    commit = "2da5a16120f913ec4f5ee7b34e84d7a08a02740f",  # Aug 30, 2017
+    commit = MIXER,
     remote = "https://github.com/istio/mixer",
 )
 
 load("@com_github_istio_mixer//test:repositories.bzl", "mixer_test_repositories")
+
 mixer_test_repositories()
