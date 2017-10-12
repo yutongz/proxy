@@ -15,17 +15,11 @@
 ################################################################################
 #
 
-MIXER_CLIENT = "8496ba65a3499328218c282ec4a2419a4910f31c"
+MIXER_CLIENT = "506d9c1113ecfe3bbffd5d5f55968a15282119a1"
 
-def mixer_client_repositories(bind=True):
+def mixer_client_repositories():
     native.git_repository(
         name = "mixerclient_git",
         commit = MIXER_CLIENT,
         remote = "https://github.com/istio/mixerclient.git",
     )
-
-    if bind:
-        native.bind(
-            name = "mixer_client_lib",
-            actual = "@mixerclient_git//:mixer_client_lib",
-        )

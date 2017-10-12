@@ -28,3 +28,9 @@ config_setting(
 load("@io_bazel_rules_go//go:def.bzl", "go_prefix")
 
 go_prefix("istio.io/proxy")
+
+proto_lang_toolchain(
+    name = "cc_toolchain",
+    runtime = "//external:protobuf",
+)
+

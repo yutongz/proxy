@@ -22,16 +22,6 @@ load(
 
 mixer_client_repositories()
 
-load(
-    "@mixerclient_git//:repositories.bzl",
-    "googleapis_repositories",
-    "mixerapi_repositories",
-)
-
-googleapis_repositories()
-
-mixerapi_repositories()
-
 bind(
     name = "boringssl_crypto",
     actual = "//external:ssl",
@@ -57,27 +47,25 @@ load("@envoy_api//bazel:repositories.bzl", "api_dependencies")
 
 api_dependencies()
 
-# Following go repositories are for building go integration test for mixer filter.
+ISTIO_API = "fadf8937f1e3b88a0a5fb7325d34259f0d65d947" # Oct 11, 2017
+
+git_repository(
+    name = "io_istio_api",
+    commit = ISTIO_API,
+    remote = "https://github.com/istio/api.git",
+)
+
 git_repository(
     name = "io_bazel_rules_go",
     commit = "7991b6353e468ba5e8403af382241d9ce031e571",  # Aug 1, 2017 (gazelle fixes)
     remote = "https://github.com/bazelbuild/rules_go.git",
 )
 
-git_repository(
-    name = "org_pubref_rules_protobuf",
-    commit = "9ede1dbc38f0b89ae6cd8e206a22dd93cc1d5637",
-    remote = "https://github.com/pubref/rules_protobuf",
-)
+load("@io_bazel_rules_go//go:def.bzl", "go_repositories", "go_repository")
 
-MIXER = "535eb564667cef6aed334cb4f5e967a104768387"
+go_repositories()
 
-git_repository(
-    name = "com_github_istio_mixer",
-    commit = MIXER,
-    remote = "https://github.com/istio/mixer",
-)
+load("@io_istio_api//:api.bzl", "go_istio_api_dependencies")
 
-load("@com_github_istio_mixer//test:repositories.bzl", "mixer_test_repositories")
+go_istio_api_dependencies(bind=False)
 
-mixer_test_repositories()
