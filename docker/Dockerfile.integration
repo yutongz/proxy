@@ -1,0 +1,29 @@
+FROM ubuntu:xenial
+# Do not add more stuff to this list that isn't small or critically useful.
+# If you occasionally need something on the container do
+# sudo /usr/local/bin/proxy-redirection-clear
+# sudo apt-get update && apt-get whichever
+# sudo /usr/local/bin/proxy-redirection-restore
+RUN apt-get update && \
+    apt-get install --no-install-recommends -y \
+      curl \
+      iptables \
+      iproute2 \
+      iputils-ping \
+      dnsutils \
+      netcat \
+      tcpdump \
+      net-tools \
+      libc6-dbg gdb \
+      elvis-tiny \
+      lsof \
+      busybox \
+      sudo && \
+    rm -rf /var/lib/apt/lists/*
+
+# Deprecated: use "/usr/local/bin/istio-iptables.sh clear"
+ADD src/envoy/mixer/envoy.conf.template /var/lib/istio/envoy/envoy.conf.template
+ADD bazel-bin/src/envoy/mixer/envoy /usr/local/bin/envoy
+ADD src/envoy/mixer/start_envoy /usr/local/bin/start_envoy
+
+ENTRYPOINT /usr/local/bin/start_envoy -e /usr/local/bin/envoy -t /var/lib/istio/envoy/envoy.conf.template -c /var/lib/istio/envoy/envoy.conf
